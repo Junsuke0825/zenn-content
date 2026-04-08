@@ -1,105 +1,96 @@
 ---
-title: "PC監視アプリを1日で大改造してみた — SQLite JST化・Vision API移行・コスト最適化まで"
-emoji: "🛠️"
+title: "PC監視アプリを本気で改善してみた：OCR廃止・重複ログ解消・SQLiteマイグレーションまで"
+emoji: "🖥️"
 type: "tech"
 topics:
   - SQLite
-  - ClaudeAPI
-  - Node.js
+  - Claude
   - TypeScript
-  - 個人開発
+  - Electron
+  - OCR
 published: true
 ---
 
 ## はじめに
 
-自作のPC監視アプリを「動く状態」から「ちゃんと使える状態」へと引き上げるべく、1日かけて集中的にリファクタリングを行いました。SQLiteの日時問題・スクリーンショット取得方法の見直し・OCRからClaude Vision APIへの移行・コスト最適化まで、詰め込んだ内容をまとめます。
+自作のPC活動監視アプリの品質改善に集中して取り組んだ。ログの重複問題、OCRの精度不足、アクティブウィンドウキャプチャの実装、SQLiteのカラム削除対応、そしてAPIコスト削減まで、一気に複数の課題を解消したのでまとめる。
 
 ---
 
-## 本日の作業内容
+## 作業内容
 
-### 午前：SQLite JST化 & テーブルリファクタリング
+### 1. windowWatcher廃止によるログ重複の解消
 
-ログの時刻がずっとUTCで記録されていたため、全テーブルのタイムスタンプをJSTに統一しました。
+`windowWatcher` と `screenshotCapture` の2つのモジュールが、それぞれ独立して `logs` テーブルへ書き込んでいたため、同一イベントのレコードが重複して蓄積されていた。
 
-SQLiteの `datetime('now')` はデフォルトでUTCを返します。JST（UTC+9）で取得するには以下のように書く必要があります。
+原因を調査した結果、`windowWatcher` の役割が `screenshotCapture` と機能的に重複していることが判明。`windowWatcher` を廃止し、ログの書き込み責務を `screenshotCapture` に一本化することで重複を解消した。
 
-```sql
-SELECT datetime('now', '+9 hours');
+### 2. Tesseract.js → Claude Haiku Vision API へのOCR切り替え
+
+スクリーンショットのテキスト解析にローカルOCRライブラリの `Tesseract.js` を使用していたが、日本語混じりのUI画面では誤認識が多く、実用に耐えない精度だった。
+
+そこで Claude Haiku の Vision API にスクリーンショットをそのまま送信する方式へ切り替えた。LLMによる画像理解は文脈を踏まえた解析が得意なため、テキスト抽出の精度が大幅に向上した。
+
+```ts
+// 例：base64エンコードしたスクリーンショットをClaudeに送信
+const response = await anthropic.messages.create({
+  model: 'claude-haiku-20240307',
+  max_tokens: 1024,
+  messages: [
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/png',
+            data: screenshotBase64,
+          },
+        },
+        { type: 'text', text: '画面に表示されているアプリ名と作業内容を簡潔に答えてください。' },
+      ],
+    },
+  ],
+});
 ```
 
-またSQLiteにはMySQLやPostgreSQLのような `ALTER TABLE DROP COLUMN` が（古いバージョンでは）使えません。カラム削除が必要な場合は、**テーブル再構築**で対応します。
+### 3. アクティブウィンドウのみキャプチャする実装
 
-```sql
--- 1. 新テーブルを作成
-CREATE TABLE new_table AS SELECT col1, col2 FROM old_table WHERE 1=0;
+フルスクリーンのキャプチャではなく、現在フォーカスされているウィンドウだけを切り出したかった。
 
--- 2. データを移行
-INSERT INTO new_table (col1, col2)
-SELECT col1, col2 FROM old_table;
+`windows-ss` パッケージを試みたが、Node.js v20向けのプリビルドバイナリが存在せずビルドエラーが解消できなかったため断念。代替として `node-screenshots` パッケージを採用することで、アクティブウィンドウ限定のキャプチャを実現できた。
 
--- 3. 旧テーブルを削除して名前を変更
-DROP TABLE old_table;
-ALTER TABLE new_table RENAME TO old_table;
-```
+### 4. SQLiteのカラム削除マイグレーション
 
-地味ですが、知らないとハマるポイントです。
+SQLiteは `ALTER TABLE ... DROP COLUMN` の制約が厳しく、インデックスや制約が絡むカラムは直接削除できないケースがある。
 
----
+今回は以下の手順でテーブルを再構築するマイグレーションで対応した。
 
-### 午後：アクティブウィンドウ専用キャプチャ & Vision API移行
+1. 新しいスキーマで一時テーブルを作成
+2. 既存テーブルから必要なカラムのみ `INSERT INTO ... SELECT` でコピー
+3. 元のテーブルを削除し、一時テーブルをリネーム
 
-これまで全画面スクリーンショット＋Tesseract OCRで画面内容を取得していましたが、2つの課題がありました。
+またタイムゾーン対応として、UTC保存だったタイムスタンプをJST（Asia/Tokyo）に統一するマイグレーションも同時に実施した。
 
-- **精度が低い**：日本語OCRの認識精度に限界がある
-- **余計な情報が多い**：全画面だとタスクバーや無関係なウィンドウも混入する
+### 5. Claude APIモデルをOpus → Sonnetへ変更しコスト削減
 
-そこで以下の変更を実施しました。
+Claude APIのモデル別料金を改めて比較した結果、`claude-3-opus` から `claude-3-5-sonnet` へ変更することで、**入力・出力トークンともに約1/5のコスト**に削減できることがわかった。
 
-**① アクティブウィンドウのみキャプチャ**
-
-`node-screenshots` パッケージを使うことで、Windowsでもアクティブウィンドウだけを切り出せることがわかりました。当初候補だった `windows-ss` はNode.js v20向けのビルド済みバイナリがなく断念。`node-screenshots` は事前ビルド済みバイナリが充実しており、すんなり動きました。
-
-```typescript
-import { Screenshots } from 'node-screenshots';
-
-const activeWindow = Screenshots.fromActiveWindow();
-const image = activeWindow?.captureSync();
-```
-
-**② OCR → Claude Vision API（Haiku）へ移行**
-
-キャプチャ画像をbase64エンコードしてClaude APIに渡すだけで、画面の内容を自然言語で説明してくれます。Tesseractと比べて圧倒的に精度が高く、コンテキストも理解してくれるのが強みです。
+監視アプリのような高頻度・大量リクエストのユースケースでは、モデル選定がランニングコストに直結するため、精度と価格のバランスを意識した選択が重要だと改めて感じた。
 
 ---
 
-### 夜間：chat_logsのタグ除去 & コスト最適化
+## 学んだこと
 
-**Claude CodeのJSONLログ処理**
-
-Claude CodeのログはJSONL形式（1行1イベント）で出力されますが、VSCodeが自動挿入する `ide_opened_file` や `ide_selection` タグが混入していました。取り込み時にこれらを除去するフィルタ処理を追加しています。
-
-**モデルをOpus → Sonnetに変更**
-
-ログ分析用のモデルをClaude Opus から Claude Sonnet に切り替えました。コストはおよそ **1/5** になります。分析タスクの精度的にもSonnetで十分と判断しました。日常的なバッチ処理ではモデル選定がランニングコストに直結するため、定期的に見直す価値があります。
-
----
-
-## 学んだこと まとめ
-
-| テーマ | 学び |
-|---|---|
-| SQLite | カラム削除はテーブル再構築で対応 |
-| SQLite | `datetime('now', '+9 hours')` でJST取得 |
-| Node.js | アクティブウィンドウ取得は `node-screenshots` が安定 |
-| Claude API | Opus→Sonnetでコスト約1/5、分析用途ならSonnetで十分 |
-| JSONL処理 | VSCode自動挿入タグの除去処理が必要 |
+- **責務の重複はログ品質を壊す**：複数モジュールが同一テーブルに書き込む設計は早期に整理すべき
+- **ローカルOCRの限界**：Tesseract.jsは英数字には強いが、日本語UIの解析にはLLM Vision APIの方が現実的
+- **Node.jsバージョンとネイティブモジュールの相性**：プリビルドバイナリの有無は採用可否に直結するため事前確認が必要
+- **SQLiteの制約を理解した上でマイグレーションを設計する**：テーブル再構築パターンはSQLiteを使う限り避けられないスキル
+- **LLM APIのコストはモデル選定で大きく変わる**：Opusが必要なタスクかを見極め、Sonnetで十分なら積極的に使う
 
 ---
 
 ## まとめ
 
-「動くけど微妙」な状態のアプリを1日で大幅改善できました。特にSQLiteのJST化とVision API移行は、データの信頼性と解析品質の両方を底上げできた実感があります。
-
-明日はS3アップロード処理のタイミング問題と、DynamoDBの重複書き込みバグの調査を進める予定です。自作ツールの改善は終わりがなくて楽しいですね。
+自作ツールのリファクタリングは、設計の歪みや技術的負債を一気に解消できる良い機会だ。特にOCRからVision APIへの切り替えは精度面で大きなインパクトがあり、ローカル処理への固執よりもクラウドAPIを活用する柔軟さが重要だと感じた。SQLiteの制約やNode.jsのネイティブモジュール問題など、地味だが確実に詰まるポイントも整理できたのは収穫だった。
