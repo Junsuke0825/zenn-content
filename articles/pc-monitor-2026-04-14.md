@@ -1,92 +1,160 @@
 ---
-title: "VitestとPlaywrightを組み合わせたTDDサイクルを実践してみた"
+title: "PlaywrightとVitestの共存で学んだテスト環境の落とし穴と改善記録"
 emoji: "🧪"
 type: "tech"
 topics:
-  - TypeScript
-  - Vitest
   - Playwright
-  - TDD
+  - Vitest
+  - TypeScript
+  - Next.js
   - テスト
 published: true
 ---
 
 ## はじめに
 
-PC監視アプリの開発において、VitestによるユニットテストとPlaywrightによるE2Eテストを組み合わせたTDD（テスト駆動開発）サイクルを実践した。わずか24分という短い時間の中でも、テストとコードの往復を繰り返すリズムが体に染み込んでくる感覚があったので、その流れをまとめておく。
+PC監視アプリの開発を進める中で、テスト環境の整備と分析機能のリファクタリングを行った。PlaywrightによるE2Eテスト（12件）とVitestによるユニットテストを運用する中で、いくつかの実践的な知見が得られたのでまとめておく。
+
+---
 
 ## 作業内容
 
-### 対象プロジェクト
+### 1. PlaywrightによるE2EテストとVitestによるユニットテスト
 
-TypeScriptで構築したPC監視アプリ（`20260331_PC監視アプリ`）に対して、前日深夜から続けていたテスト追加作業の仕上げを実施した。
+まず、既存のユニットテストが全て通ることを確認した。その後、E2Eテストを12件実行してコミットまで完了させた。
 
-- **Vitestのユニットテスト**: 192件
-- **PlaywrightのE2Eテスト**: 12件
+テスト実行の過程で、PlaywrightとVitestを同時に走らせると問題が起きることに気づいた（後述）。
 
-### TDDサイクルの流れ
-
-実践したワークフローは以下のループだ。
-
-```
-1. VSCodeで reportData.ts / index.html を編集
-2. ChromeでVitest Test UIを開いてテスト結果を確認
-3. 失敗しているテストをもとにコードを修正
-4. Playwright Test Reportをブラウザで確認しE2Eの結果をレビュー
-5. 問題なければコミット
-```
-
-#### Vitest Test UIの活用
-
-Vitestにはブラウザ上でテスト結果を確認できるUIモードがある。ターミナルのログだけを追うよりも、どのテストが失敗しているかを視覚的に把握しやすく、修正箇所の特定が素早くできた。
-
-```bash
-npx vitest --ui
-```
-
-#### Playwright Test Reportの確認
-
-E2Eテストが完了したあと、HTMLレポートをブラウザで開いてスクリーンショットやトレースを確認した。
-
-```bash
-npx playwright show-report
-```
-
-junit.xml形式でのレポート出力も合わせて行い、CI連携を見据えた構成にしている。`playwright.config.ts` に以下のように設定することでjunit.xmlを出力できる。
-
-```typescript
-reporter: [
-  ['html'],
-  ['junit', { outputFile: 'junit.xml' }]
-],
-```
-
-### 編集したファイル
-
-| ファイル | 役割 |
-|---|---|
-| `reportData.ts` | レポート表示用データの型定義・整形ロジック |
-| `index.html` | レポートのエントリポイント |
-| `junit.xml` | CI用テスト結果レポート |
+---
 
 ## 学んだこと
 
-### ツールの視覚的フィードバックがTDDの回転を速める
+### ① PlaywrightとVitestの同時実行でメモリ不足になる
 
-Vitest UIとPlaywright Test Reportをブラウザで並べながら作業することで、「コードを変えた→結果がどう変わったか」のフィードバックが非常に速くなった。ターミナルだけで作業するより、視覚的に状態を把握できるUIツールを活用する方がTDDのリズムを保ちやすいと実感した。
+`pnpm test` でE2EテストとユニットテストをまとめてCIっぽく実行しようとしたところ、メモリ不足でクラッシュするケースに遭遇した。(自宅PCはメモリを8GBしか搭載していないため)
 
-### junit.xmlはCIへの橋渡し
+原因として判明したのが、**Claude Codeのクラッシュ後にNodeプロセスが残留**していたこと。これによってメモリが圧迫され、新たなテストプロセスが起動できなかった。
 
-Playwrightのjunit.xml出力は、GitHub ActionsなどのCIツールと連携する際に便利だ。テスト結果をCI上でパース・可視化できるようになるため、ローカルでの確認だけでなくチーム共有の観点でも重要な設定だと改めて理解できた。
+対処法：
+- VSCodeを再起動する
+- タスクマネージャーで残留している `node.exe` を終了する
 
-### 短時間でもTDDサイクルは回せる
+また、E2Eテストを除外してVitestのみを実行したい場合は以下のオプションが有効。
 
-今回の作業時間は約24分と短い。それでもVSCode・Vitest UI・Playwright Test Reportを組み合わせることで、複数のテスト修正とコミットまでを完結させることができた。TDDは長時間取れないと効果が薄いというイメージがあったが、ツールの整備さえしておけばスキマ時間でも有効に機能すると気づいた。
+```bash
+pnpm vitest --exclude e2e/**
+```
+
+PlaywrightとVitestは並列実行よりも、スクリプトを分けて順次実行するほうが安定しやすい。
+
+---
+
+### ② テストレポートの確認方法
+
+テスト結果をブラウザで確認する方法が2通りあることを整理した。
+
+**Playwright（E2E）のレポート表示**
+
+```bash
+pnpm exec playwright show-report e2e-results
+```
+
+このコマンドで、Playwrightが生成したHTMLレポートをローカルブラウザで確認できる。テストの成功・失敗・スクリーンショットなどが一覧表示される。
+
+**Vitest（UT）のレポート表示**
+
+```bash
+npx vite preview --outDir test-results
+```
+
+こちらはVitestのカバレッジや結果をローカルサーバー経由で確認する方法。
+
+どちらもCLIのログだけでなく、ビジュアルなレポートで確認できるのは開発体験として嬉しい。
+
+---
+
+### ③ PlaywrightのE2EテストでNext.jsサーバーの起動待ちが発生する
+
+Playwrightのテストを実行する際、Next.jsの開発サーバーが立ち上がっていないとテストが失敗する。これを解決するには `playwright.config.ts` に `webServer` の設定を記述する。
+
+```ts
+// playwright.config.ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  webServer: {
+    command: 'pnpm dev',
+    url: 'http://localhost:3000',
+    reuseExistingServer: !process.env.CI,
+  },
+  // ...
+});
+```
+
+これにより、テスト実行前にNext.jsサーバーが自動で起動し、サーバーが準備できてからテストが始まる。`reuseExistingServer` を `true` にしておくと、すでに起動中のサーバーを再利用してくれるため、ローカル開発時の二重起動を防げる。
+
+---
+
+### ④ Playwrightのテストプロセスは `.env.local` を自動で読み込まない
+
+これは見落としがちなポイント。Next.jsは `.env.local` を自動で読み込んでくれるが、**Playwrightのテストプロセスは別のNode.jsプロセス**として動作するため、この恩恵を受けられない。
+
+テストコード内で `process.env.API_KEY` などの環境変数を参照している場合は、`dotenv` を使って明示的に読み込む必要がある。
+
+**インストール**
+
+```bash
+pnpm add -D dotenv
+```
+
+**playwright.config.ts の先頭に記述**
+
+```ts
+import * as dotenv from 'dotenv';
+import path from 'path';
+
+dotenv.config({ path: path.resolve(__dirname, '.env.local') });
+```
+
+これだけで、テストコード内から `.env.local` の値を参照できるようになる。
+
+**使い分けの判断基準**
+
+| ケース | dotenv が必要か |
+|--------|----------------|
+| テストコードで `process.env.〇〇` を参照する | ✅ 必要 |
+| 環境変数を一切使わないテスト | ❌ 不要 |
+
+Next.jsサーバーとPlaywrightのテストプロセスは別物という認識を持っておくと、この手の問題でハマることが減る。
+
+---
+
+### ⑤ 型定義変更時のモックデータ修正は漏れに注意
+
+今回 `AiResult` 型から `suggestions` フィールドを削除したところ、テストファイル4件のモックデータ修正が必要になった。
+
+TypeScriptの型エラーが変更箇所を教えてくれるのは強みだが、`as unknown as AiResult` のような型アサーションを使っているモックデータは型チェックをすり抜けてしまう場合がある。モックデータの管理は一箇所にまとめておくと、型変更時の影響範囲を最小化できる。
+
+```ts
+// ❌ 型アサーションで誤魔化すと変更に気づきにくい
+const mockData = { suggestions: [] } as unknown as AiResult;
+
+// ✅ 型に忠実なモックデータで書いておく
+const mockData: AiResult = {
+  summary: '...',
+  // suggestions は削除済みなのでここには書かない
+};
+```
+
+---
 
 ## まとめ
 
-- VitestのUI modeとPlaywright Test Reportを併用することで、TDDのフィードバックループを高速化できる
-- junit.xmlの出力設定をしておくと、CI連携への準備が整う
-- ツールの視覚的フィードバックを最大限活用することが、短時間でのTDD実践のカギになる
+テスト環境の整備は「動けばいい」ではなく、**安定して実行できる環境を作ること**が重要だと改めて感じた作業だった。特に印象に残ったポイントを振り返る。
 
-テスト環境を整備しておくと、作業時間が短くても質の高い開発サイクルを維持できる。まだVitestやPlaywrightのUIツールを使っていない人はぜひ試してみてほしい。
+- **PlaywrightとVitestの同時実行はメモリ問題を引き起こす**ことがある。残留プロセスにも注意。
+- **テストプロセスはNext.jsとは別プロセス**であることを意識すると、環境変数まわりのハマりが防げる。
+- **`playwright.config.ts` の `webServer` 設定**を使うと、Next.jsサーバーの起動待ちを自動化できる。
+- **型定義を変更したら、モックデータの修正漏れ**がないか必ずチェックする。
+
+地道な作業だが、こうした基盤を整えておくことでその後の開発速度と品質に大きく影響する。テスト環境の整備はコストに見えて、実は最大の投資だと感じている。
