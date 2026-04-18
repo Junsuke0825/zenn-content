@@ -1,5 +1,5 @@
 ---
-title: "Google Gemini × Canvaで日本風Tシャツを量産してみた｜AI画像生成の制限と戦いながら学んだこと"
+title: "Google Gemini × Canvaで日本風Tシャツをデザイン｜AI画像生成の制限と戦いながら学んだこと"
 emoji: "👘"
 type: "tech"
 topics:
